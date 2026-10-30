@@ -9,7 +9,7 @@ RUN dotnet publish BusBooking.Api.csproj --configuration Release --no-restore --
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 ENV ASPNETCORE_HTTP_PORTS=8080 \
-    ConnectionStrings__Default="Data Source=/app/data/busbooking.db"
+    ConnectionStrings__Default="Data Source=busbooking.db"
 EXPOSE 8080
 VOLUME ["/app/data"]
 

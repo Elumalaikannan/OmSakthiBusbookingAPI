@@ -1,0 +1,7 @@
+.git/
+.vs/
+bin/
+obj/
+data/
+busbooking.db
+appsettings.Development.json

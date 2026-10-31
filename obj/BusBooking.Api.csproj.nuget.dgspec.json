@@ -54,9 +54,13 @@
               "target": "Package",
               "version": "[10.0.0, )"
             },
-            "Microsoft.EntityFrameworkCore.InMemory": {
+            "Microsoft.EntityFrameworkCore.Sqlite": {
               "target": "Package",
               "version": "[10.0.0, )"
+            },
+            "SQLitePCLRaw.lib.e_sqlite3": {
+              "target": "Package",
+              "version": "[2.1.14, )"
             },
             "Swashbuckle.AspNetCore": {
               "target": "Package",

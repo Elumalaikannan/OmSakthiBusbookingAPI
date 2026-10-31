@@ -32,8 +32,10 @@ var jwtExpiryMinutes = builder.Configuration.GetValue<int?>("Jwt:ExpiryMinutes")
 if (jwtExpiryMinutes < 1)
     throw new InvalidOperationException("Jwt:ExpiryMinutes must be greater than zero.");
 
+builder.Services.AddSingleton(new JsonDatabaseStore(
+    builder.Configuration["JsonDatabase:FilePath"] ?? "data/busbooking.json"));
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlite(builder.Configuration.GetConnectionString("Default")));
+    options.UseInMemoryDatabase("BusBooking"));
 builder.Services.AddScoped<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.WithOrigins(builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
@@ -103,13 +105,25 @@ app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
 
+var requestLock = new SemaphoreSlim(1, 1);
+app.Use(async (context, next) =>
+{
+    await requestLock.WaitAsync(context.RequestAborted);
+    try
+    {
+        await next(context);
+    }
+    finally
+    {
+        requestLock.Release();
+    }
+});
+
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await db.Database.EnsureCreatedAsync();
-    await EnsureTripStatusColumnAsync(db);
-    await EnsureBookingColumnsAsync(db);
-    await EnsureActiveSeatUniqueIndexAsync(db);
+    await scope.ServiceProvider.GetRequiredService<JsonDatabaseStore>().LoadAsync(db);
+    await db.SaveChangesAsync();
     var seedEmail = app.Configuration["AdminSeed:Email"]?.Trim().ToLowerInvariant();
     var seedPassword = app.Configuration["AdminSeed:Password"];
     if (!string.IsNullOrWhiteSpace(seedEmail) && !string.IsNullOrWhiteSpace(seedPassword)
@@ -165,9 +179,11 @@ auth.MapPost("/forgot-password", async (ForgotPasswordRequest request, AppDbCont
     if (user is null)
         return Results.Ok(new { message = "If the account exists, password reset instructions will be sent." });
 
-    await db.PasswordResetTokens
+    var unusedTokens = await db.PasswordResetTokens
         .Where(x => x.UserId == user.Id && x.UsedAtUtc == null)
-        .ExecuteUpdateAsync(update => update.SetProperty(x => x.UsedAtUtc, DateTime.UtcNow));
+        .ToListAsync();
+    foreach (var token in unusedTokens)
+        token.UsedAtUtc = DateTime.UtcNow;
     var rawToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
         .TrimEnd('=').Replace('+', '-').Replace('/', '_');
     db.PasswordResetTokens.Add(new PasswordResetToken
@@ -303,13 +319,13 @@ trips.MapPost("/{id:int}/cancel", async (int id, AppDbContext db) =>
     if (trip.DepartureUtc <= DateTime.UtcNow)
         return Results.Conflict(new { message = "Only upcoming trips can be cancelled." });
 
-    await using var transaction = await db.Database.BeginTransactionAsync();
     trip.Status = "Cancelled";
-    await db.Bookings
+    var confirmedBookings = await db.Bookings
         .Where(x => x.TripId == id && x.Status == "Confirmed")
-        .ExecuteUpdateAsync(update => update.SetProperty(x => x.Status, "Cancelled"));
+        .ToListAsync();
+    foreach (var booking in confirmedBookings)
+        booking.Status = "Cancelled";
     await db.SaveChangesAsync();
-    await transaction.CommitAsync();
     return Results.Ok(new { message = "Trip cancelled; confirmed bookings are marked cancelled.", tripId = id });
 }).RequireAuthorization("AdminOnly");
 trips.MapDelete("/{id:int}", async (int id, AppDbContext db) =>
@@ -359,7 +375,6 @@ bookings.MapPost("/", async (CreateBookingRequest request, ClaimsPrincipal princ
     if (!await db.Users.AnyAsync(x => x.Id == userId))
         return Results.NotFound(new { message = "Booking user not found." });
 
-    await using var transaction = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
     var seatAlreadyBooked = await db.Bookings.AnyAsync(x =>
         x.TripId == trip.Id && x.SeatNumber == request.SeatNumber && x.Status == "Confirmed");
     if (seatAlreadyBooked) return Results.Conflict(new { message = "That seat has already been booked. Please choose another seat." });
@@ -377,7 +392,6 @@ bookings.MapPost("/", async (CreateBookingRequest request, ClaimsPrincipal princ
     db.Bookings.Add(booking);
     try { await db.SaveChangesAsync(); }
     catch (DbUpdateException) { return Results.Conflict(new { message = "The seat was just booked. Please try again." }); }
-    await transaction.CommitAsync();
     await db.Entry(booking).Reference(x => x.User).LoadAsync();
     booking.Trip = trip;
     return Results.Created($"/api/bookings/{booking.Id}", ToBookingResponse(booking));
@@ -412,8 +426,6 @@ bookings.MapPost("/group", async (CreateGroupBookingRequest request, ClaimsPrinc
     if (!await db.Users.AnyAsync(x => x.Id == userId))
         return Results.NotFound(new { message = "Booking user not found." });
 
-    await using var transaction = await db.Database.BeginTransactionAsync(
-        System.Data.IsolationLevel.Serializable);
     var bookedSeats = await db.Bookings
         .Where(x => x.TripId == trip.Id && x.Status == "Confirmed"
             && request.SeatNumbers.Contains(x.SeatNumber))
@@ -449,7 +461,6 @@ bookings.MapPost("/group", async (CreateGroupBookingRequest request, ClaimsPrinc
         return Results.Conflict(new { message = "One or more selected seats were just booked. No seats were reserved; refresh availability and choose again." });
     }
 
-    await transaction.CommitAsync();
     foreach (var booking in createdBookings)
     {
         booking.User = await db.Users.SingleAsync(x => x.Id == userId);
@@ -547,80 +558,6 @@ static BookingResponse ToBookingResponse(Booking booking) => new(
     booking.Trip.Bus.Capacity, booking.SeatNumber, booking.PassengerName, booking.PassengerAge,
     booking.PassengerGender, booking.PassengerMobileNumber, booking.AdhiparasakthiCircleName,
     booking.Trip.Price, booking.Status, booking.BookedAtUtc);
-
-static async Task EnsureBookingColumnsAsync(AppDbContext db)
-{
-    var columns = new (string Name, string Sql)[]
-    {
-        ("PassengerName", "ALTER TABLE \"Bookings\" ADD COLUMN \"PassengerName\" TEXT NOT NULL DEFAULT ''"),
-        ("PassengerAge", "ALTER TABLE \"Bookings\" ADD COLUMN \"PassengerAge\" INTEGER NOT NULL DEFAULT 0"),
-        ("PassengerGender", "ALTER TABLE \"Bookings\" ADD COLUMN \"PassengerGender\" TEXT NOT NULL DEFAULT ''"),
-        ("PassengerMobileNumber", "ALTER TABLE \"Bookings\" ADD COLUMN \"PassengerMobileNumber\" TEXT NOT NULL DEFAULT ''"),
-        ("AdhiparasakthiCircleName", "ALTER TABLE \"Bookings\" ADD COLUMN \"AdhiparasakthiCircleName\" TEXT NOT NULL DEFAULT ''")
-    };
-    await db.Database.OpenConnectionAsync();
-    try
-    {
-        var existingColumns = new HashSet<string>(StringComparer.Ordinal);
-        await using (var check = db.Database.GetDbConnection().CreateCommand())
-        {
-            check.CommandText = "PRAGMA table_info('Bookings')";
-            await using var reader = await check.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-                existingColumns.Add(reader.GetString(1));
-        }
-
-        foreach (var column in columns.Where(column => !existingColumns.Contains(column.Name)))
-            await db.Database.ExecuteSqlRawAsync(column.Sql);
-    }
-    finally
-    {
-        await db.Database.CloseConnectionAsync();
-    }
-}
-
-static async Task EnsureTripStatusColumnAsync(AppDbContext db)
-{
-    await db.Database.OpenConnectionAsync();
-    try
-    {
-        await using var check = db.Database.GetDbConnection().CreateCommand();
-        check.CommandText = "PRAGMA table_info('Trips')";
-        await using var reader = await check.ExecuteReaderAsync();
-        var hasStatus = false;
-        while (await reader.ReadAsync())
-        {
-            if (reader.GetString(1) == "Status")
-            {
-                hasStatus = true;
-                break;
-            }
-        }
-
-        await reader.DisposeAsync();
-        if (!hasStatus)
-            await db.Database.ExecuteSqlRawAsync(
-                "ALTER TABLE \"Trips\" ADD COLUMN \"Status\" TEXT NOT NULL DEFAULT 'Scheduled'");
-    }
-    finally
-    {
-        await db.Database.CloseConnectionAsync();
-    }
-}
-
-static async Task EnsureActiveSeatUniqueIndexAsync(AppDbContext db)
-{
-    var indexSql = await db.Database.SqlQueryRaw<string?>(
-        "SELECT sql AS Value FROM sqlite_master WHERE type = 'index' AND name = 'IX_Bookings_TripId_SeatNumber'")
-        .SingleOrDefaultAsync();
-    if (indexSql?.Contains("WHERE", StringComparison.OrdinalIgnoreCase) == true)
-        return;
-
-    await db.Database.ExecuteSqlRawAsync(
-        "DROP INDEX IF EXISTS \"IX_Bookings_TripId_SeatNumber\"");
-    await db.Database.ExecuteSqlRawAsync(
-        "CREATE UNIQUE INDEX \"IX_Bookings_TripId_SeatNumber\" ON \"Bookings\" (\"TripId\", \"SeatNumber\") WHERE \"Status\" = 'Confirmed'");
-}
 
 public sealed record RegisterRequest(string Name, string Email, string Password);
 public sealed record LoginRequest(string Email, string Password);

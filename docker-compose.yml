@@ -8,4 +8,4 @@ services:
     environment:
       Jwt__SecretKey: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in the environment or .env file}
     volumes:
-      - ./data:/app/data
+      - ./data:/var/data

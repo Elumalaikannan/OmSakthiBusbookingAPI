@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "D:\\Pandi\\OmSakthiBusbookingAPI\\BusBooking.Api.csproj": {}
+    "D:\\Dev\\OmSakthiBusbookingAPI\\BusBooking.Api.csproj": {}
   },
   "projects": {
-    "D:\\Pandi\\OmSakthiBusbookingAPI\\BusBooking.Api.csproj": {
+    "D:\\Dev\\OmSakthiBusbookingAPI\\BusBooking.Api.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\Pandi\\OmSakthiBusbookingAPI\\BusBooking.Api.csproj",
+        "projectUniqueName": "D:\\Dev\\OmSakthiBusbookingAPI\\BusBooking.Api.csproj",
         "projectName": "BusBooking.Api",
-        "projectPath": "D:\\Pandi\\OmSakthiBusbookingAPI\\BusBooking.Api.csproj",
+        "projectPath": "D:\\Dev\\OmSakthiBusbookingAPI\\BusBooking.Api.csproj",
         "packagesPath": "C:\\Users\\ADMIN\\.nuget\\packages\\",
-        "outputPath": "D:\\Pandi\\OmSakthiBusbookingAPI\\obj\\",
+        "outputPath": "D:\\Dev\\OmSakthiBusbookingAPI\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

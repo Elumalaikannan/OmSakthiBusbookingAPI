@@ -37,7 +37,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddScoped<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.WithOrigins(builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
-        ?? ["https://omsakthivignannager02.netlify.app"]).AllowAnyHeader().AllowAnyMethod()));
+        ?? ["http://localhost:4200"]).AllowAnyHeader().AllowAnyMethod()));
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(options =>
 {
     options.TokenValidationParameters = new TokenValidationParameters
@@ -233,7 +233,7 @@ trips.MapGet("/manage", async (AppDbContext db) =>
         .OrderByDescending(x => x.DepartureUtc)
         .Select(x => new TripResponse(
             x.Id, x.BusId, x.Bus!.Name, x.Bus.RegistrationNumber, x.Bus.Capacity, x.Origin, x.Destination,
-            x.DepartureUtc, x.ArrivalUtc, x.Price,
+            TripTime.ToUtcOffset(x.DepartureUtc), TripTime.ToUtcOffset(x.ArrivalUtc), x.Price,
             x.Bus.Capacity - x.Bookings.Count(b => b.Status == "Confirmed"),
             x.Status, x.Bookings.Count))
         .ToListAsync();
@@ -264,21 +264,25 @@ trips.MapGet("/", async (AppDbContext db, string? origin, string? destination, D
         query = query.Where(x => x.Destination.ToLower().Contains(destination.Trim().ToLower()));
     if (date.HasValue)
     {
-        var day = date.Value.Date;
-        query = query.Where(x => x.DepartureUtc >= day && x.DepartureUtc < day.AddDays(1));
+        var localDay = DateTime.SpecifyKind(date.Value.Date, DateTimeKind.Unspecified);
+        var dayStartUtc = TripTime.ToUtc(localDay);
+        var dayEndUtc = dayStartUtc.AddDays(1);
+        query = query.Where(x => x.DepartureUtc >= dayStartUtc && x.DepartureUtc < dayEndUtc);
     }
     var results = await query.OrderBy(x => x.DepartureUtc).Select(x => new TripResponse(
         x.Id, x.BusId, x.Bus!.Name, x.Bus.RegistrationNumber, x.Bus.Capacity, x.Origin, x.Destination,
-        x.DepartureUtc, x.ArrivalUtc, x.Price,
+        TripTime.ToUtcOffset(x.DepartureUtc), TripTime.ToUtcOffset(x.ArrivalUtc), x.Price,
         x.Bus.Capacity - x.Bookings.Count(b => b.Status == "Confirmed"),
         x.Status, x.Bookings.Count)).ToListAsync();
     return Results.Ok(results);
 });
 trips.MapPost("/", async (TripRequest request, AppDbContext db) =>
 {
+    var departureUtc = ToUtc(request.DepartureUtc);
+    var arrivalUtc = ToUtc(request.ArrivalUtc);
     if (string.IsNullOrWhiteSpace(request.Origin) || string.IsNullOrWhiteSpace(request.Destination)
         || request.Origin.Trim().Equals(request.Destination.Trim(), StringComparison.OrdinalIgnoreCase)
-        || request.DepartureUtc <= DateTime.UtcNow || request.ArrivalUtc <= request.DepartureUtc
+        || departureUtc <= DateTime.UtcNow || arrivalUtc <= departureUtc
         || request.Price <= 0)
         return Results.BadRequest(new { message = "Provide distinct route cities, a future departure, a later arrival, and a positive price." });
     var bus = await db.Buses.FindAsync(request.BusId);
@@ -286,13 +290,14 @@ trips.MapPost("/", async (TripRequest request, AppDbContext db) =>
     var trip = new Trip
     {
         BusId = bus.Id, Origin = request.Origin.Trim(), Destination = request.Destination.Trim(),
-        DepartureUtc = ToUtc(request.DepartureUtc), ArrivalUtc = ToUtc(request.ArrivalUtc), Price = request.Price
+        DepartureUtc = departureUtc, ArrivalUtc = arrivalUtc, Price = request.Price
     };
     db.Trips.Add(trip);
     await db.SaveChangesAsync();
     return Results.Created($"/api/trips/{trip.Id}", new TripResponse(
         trip.Id, bus.Id, bus.Name, bus.RegistrationNumber, bus.Capacity, trip.Origin, trip.Destination,
-        trip.DepartureUtc, trip.ArrivalUtc, trip.Price, bus.Capacity, trip.Status, 0));
+        TripTime.ToUtcOffset(trip.DepartureUtc), TripTime.ToUtcOffset(trip.ArrivalUtc),
+        trip.Price, bus.Capacity, trip.Status, 0));
 }).RequireAuthorization("AdminOnly");
 trips.MapPost("/{id:int}/cancel", async (int id, AppDbContext db) =>
 {
@@ -509,12 +514,7 @@ static string CreateJwt(AppUser user, IConfiguration config)
     return new JwtSecurityTokenHandler().WriteToken(token);
 }
 
-static DateTime ToUtc(DateTime value) => value.Kind switch
-{
-    DateTimeKind.Utc => value,
-    DateTimeKind.Local => value.ToUniversalTime(),
-    _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
-};
+static DateTime ToUtc(DateTime value) => TripTime.ToUtc(value);
 
 static bool IsValidPassengerDetails(string? name, int? age, string? gender, string? mobileNumber)
 {
@@ -542,8 +542,9 @@ static string NormalizeGender(string gender) => gender.ToLowerInvariant() switch
 
 static BookingResponse ToBookingResponse(Booking booking) => new(
     booking.Id, booking.UserId, booking.User!.Name, booking.User.Email, booking.TripId,
-    booking.Trip!.BusId, booking.Trip.Origin, booking.Trip.Destination, booking.Trip.DepartureUtc,
-    booking.Trip.ArrivalUtc, booking.Trip.Bus!.Name, booking.Trip.Bus.RegistrationNumber,
+    booking.Trip!.BusId, booking.Trip.Origin, booking.Trip.Destination,
+    TripTime.ToUtcOffset(booking.Trip.DepartureUtc), TripTime.ToUtcOffset(booking.Trip.ArrivalUtc),
+    booking.Trip.Bus!.Name, booking.Trip.Bus.RegistrationNumber,
     booking.Trip.Bus.Capacity, booking.SeatNumber, booking.PassengerName, booking.PassengerAge,
     booking.PassengerGender, booking.PassengerMobileNumber, booking.AdhiparasakthiCircleName,
     booking.Trip.Price, booking.Status, booking.BookedAtUtc);
@@ -638,10 +639,18 @@ public sealed record CreateGroupBookingRequest(int TripId, int[]? SeatNumbers,
     PassengerDetailsRequest[]? Passengers, int? UserId);
 public sealed record SeatResponse(int SeatNumber, string Status);
 public sealed record TripResponse(int Id, int BusId, string BusName, string BusRegistrationNumber, int Capacity, string Origin,
-    string Destination, DateTime DepartureUtc, DateTime ArrivalUtc, decimal Price, int AvailableSeats,
-    string Status, int BookingCount);
+    string Destination, DateTimeOffset DepartureUtc, DateTimeOffset ArrivalUtc, decimal Price, int AvailableSeats,
+    string Status, int BookingCount)
+{
+    public DateTimeOffset DepartureIst => DepartureUtc.ToOffset(TripTime.IndiaStandardOffset);
+    public DateTimeOffset ArrivalIst => ArrivalUtc.ToOffset(TripTime.IndiaStandardOffset);
+}
 public sealed record BookingResponse(int Id, int UserId, string UserName, string UserEmail, int TripId,
-    int BusId, string Origin, string Destination, DateTime DepartureUtc, DateTime ArrivalUtc,
+    int BusId, string Origin, string Destination, DateTimeOffset DepartureUtc, DateTimeOffset ArrivalUtc,
     string BusName, string BusRegistrationNumber, int BusCapacity, int SeatNumber,
     string PassengerName, int PassengerAge, string PassengerGender, string PassengerMobileNumber,
-    string AdhiparasakthiCircleName, decimal Price, string Status, DateTime BookedAtUtc);
+    string AdhiparasakthiCircleName, decimal Price, string Status, DateTime BookedAtUtc)
+{
+    public DateTimeOffset DepartureIst => DepartureUtc.ToOffset(TripTime.IndiaStandardOffset);
+    public DateTimeOffset ArrivalIst => ArrivalUtc.ToOffset(TripTime.IndiaStandardOffset);
+}

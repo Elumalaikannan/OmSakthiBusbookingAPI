@@ -34,6 +34,24 @@ public sealed class Trip
     public ICollection<Booking> Bookings { get; set; } = [];
 }
 
+public static class TripTime
+{
+    public static readonly TimeSpan IndiaStandardOffset = TimeSpan.FromMinutes(330);
+
+    public static DateTime ToUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => new DateTimeOffset(value, IndiaStandardOffset).UtcDateTime
+    };
+
+    public static DateTimeOffset ToUtcOffset(DateTime value) =>
+        new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
+
+    public static DateTimeOffset ToIndiaStandardTime(DateTime utc) =>
+        ToUtcOffset(utc).ToOffset(IndiaStandardOffset);
+}
+
 public sealed class Booking
 {
     public int Id { get; set; }
